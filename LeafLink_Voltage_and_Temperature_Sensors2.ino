@@ -4,8 +4,6 @@
 //  Board: Arduino UNO R4 WiFi
 // =============================================================
 
-#include <Arduino.h>
-#include <Wire.h>
 #include "Adafruit_SHT31.h"
 #include <Adafruit_INA260.h>
 #include <SoftwareSerial.h>
@@ -21,15 +19,16 @@ Adafruit_INA260 ina260 = Adafruit_INA260();
 const int alertPin = 7;
 
 // ---------- SAFETY LIMITS ----------
-const float MAX_TEMP = 50.0;
-const float MAX_HUM  = 70.0;
-const float MIN_VOLT = 2.0;
+const float MAX_TEMP = 45.0;   // °C
+const float MIN_TEMP = 0.0;    // °C
+const float MAX_HUM  = 70.0;   // %
+const float MIN_VOLT = 2.0;    // V
 
 // ---------- WiFi SETTINGS ----------
-const char* ssid     = "Gentry";    
-const char* password = "123qweasd"; 
+const char* ssid     = "Gentry";
+const char* password = "123qweasd";
 
-int skip_wifi = 0;   // set to 1 if offline testing
+int skip_wifi = 0;   // set to 1 for offline testing
 
 WiFiSSLClient client;
 R4HttpClient http;
@@ -41,7 +40,11 @@ String device = "wag-R4";
 // ---------- VARIABLES ----------
 float tempC, humRH;
 float voltage_V, current_mA, power_mW;
-bool unsafeTemp, unsafeHum, lowVolt;
+
+bool unsafeTemp;
+bool unsafeCold;
+bool unsafeHum;
+bool lowVolt;
 
 // =============================================================
 // SETUP
@@ -116,11 +119,12 @@ void readSensors() {
 // CHECK CONDITIONS
 // =============================================================
 void checkConditions() {
-  unsafeTemp = tempC > MAX_TEMP;
-  unsafeHum  = humRH > MAX_HUM;
-  lowVolt    = voltage_V < MIN_VOLT;
+  unsafeTemp  = tempC > MAX_TEMP;
+  unsafeCold = tempC < MIN_TEMP;
+  unsafeHum   = humRH > MAX_HUM;
+  lowVolt     = voltage_V < MIN_VOLT;
 
-  if (unsafeTemp || unsafeHum || lowVolt) {
+  if (unsafeTemp || unsafeCold || unsafeHum || lowVolt) {
     digitalWrite(alertPin, HIGH);
   } else {
     digitalWrite(alertPin, LOW);
@@ -142,14 +146,16 @@ void displayReadings() {
 
   Serial.print("Voltage: "); Serial.print(voltage_V); Serial.println(" V");
   Serial.print("Current: "); Serial.print(current_mA); Serial.println(" mA");
-  Serial.print("Power: "); Serial.print(power_mW); Serial.println(" mW");
+  Serial.print("Power:   "); Serial.print(power_mW); Serial.println(" mW");
 
   Serial.println("===== SYSTEM STATUS =====");
   Serial.print("Overheating? "); Serial.println(unsafeTemp ? "YES" : "NO");
+  Serial.print("Too cold? ");     Serial.println(unsafeCold ? "YES" : "NO");
   Serial.print("Humidity too high? "); Serial.println(unsafeHum ? "YES" : "NO");
   Serial.print("Low voltage? "); Serial.println(lowVolt ? "YES" : "NO");
+
   Serial.print("Overall System: ");
-  Serial.println((unsafeTemp || unsafeHum || lowVolt) ? "UNSAFE" : "SAFE");
+  Serial.println((unsafeTemp || unsafeCold || unsafeHum || lowVolt) ? "UNSAFE" : "SAFE");
 }
 
 // =============================================================
@@ -164,9 +170,8 @@ void postReadingsToAWS() {
   doc["device"]     = device;
   doc["arduino_ip"] = arduino_ip;
 
-  // Unique datetime key
-  String datetime = String(millis());
-  doc["datetime"] = datetime;
+  // Unique timestamp
+  doc["datetime"] = String(millis());
 
   // Sensor data
   doc["tempC"]      = String(tempC, 2);
@@ -176,14 +181,16 @@ void postReadingsToAWS() {
   doc["power_mW"]   = String(power_mW, 2);
 
   // Safety flags
-  doc["unsafeTemp"] = unsafeTemp ? "YES" : "NO";
-  doc["unsafeHum"]  = unsafeHum  ? "YES" : "NO";
-  doc["lowVolt"]    = lowVolt    ? "YES" : "NO";
+  doc["unsafeTemp"]  = unsafeTemp  ? "YES" : "NO";
+  doc["unsafeCold"] = unsafeCold ? "YES" : "NO";
+  doc["unsafeHum"]   = unsafeHum   ? "YES" : "NO";
+  doc["lowVolt"]     = lowVolt     ? "YES" : "NO";
 
   // Overall system status
-  doc["systemStatus"] = (unsafeTemp || unsafeHum || lowVolt) ? "UNSAFE" : "SAFE";
+  doc["systemStatus"] =
+    (unsafeTemp || unsafeCold || unsafeHum || lowVolt) ? "UNSAFE" : "SAFE";
 
-  // Optional column for LeafLink
+  // Optional LeafLink metric
   doc["level"] = String(tempC, 2);
 
   String body;
@@ -205,4 +212,5 @@ void postReadingsToAWS() {
 
   http.close();
 }
+
 
