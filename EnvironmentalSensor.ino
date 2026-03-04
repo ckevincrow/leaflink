@@ -1,7 +1,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include "Adafruit_SHT31.h"
-#include <Adafruit_BME280.h>
+#include "Adafruit_BMP3XX.h"
 #include <SoftwareSerial.h>
 #include <WiFiS3.h>
 #include <R4HttpClient.h>
@@ -9,7 +9,7 @@
 
 // ---------- SENSOR OBJECTS ----------
 Adafruit_SHT31 sht31 = Adafruit_SHT31();
-Adafruit_BME280 bme; 
+Adafruit_BMP3XX bmp;
 
 // ---------- WiFi SETTINGS ----------
 const char* ssid     = "Strickland2.4";    
@@ -25,15 +25,14 @@ String arduino_ip;
 String device = "css-R4";
 
 // ---------- VARIABLES ----------
-float tempC, humRH, windSpeed_mps, windSpeed_kmh, windSpeed_mph, pressure;
+float tempC, humRH, pressure;
+const int anemometerPin = A0;
 
-const int anemometerPin = 0;  // analog pin 0 (A0)
-const float minVoltage = 0.054;  // Voltage corresponding to 0 m/s
-const float maxVoltage = 5;  // Voltage corresponding to 32.4 m/s (max speed)
-const float maxWindSpeed = 32.4; // Maximum wind speed in m/s
+const float minVoltage = 0.054;     // Voltage at 0 m/s
+const float maxVoltage = 5.0;       // Voltage at 32.4 m/s
+const float maxWindSpeed = 32.4;    // m/s
 
-const float mps_to_kmh = 3.6;   // 1 m/s = 3.6 km/h
-const float mps_to_mph = 2.23694; // 1 m/s = 2.23694 mph
+float windSpeed = 0.0;
 
 // =============================================================
 // SETUP
@@ -52,11 +51,13 @@ void setup() {
   sht31.heater(false);
   Serial.println("SHT31 Ready.");
 
-  // ---- INIT BME280 ----
-  if (!bme.begin(0x76)) {
-    Serial.println("Could not find BME280 sensor!");
+  // ---- INIT BME388 ----
+  if (!bmp.begin_I2C()) {   
+    Serial.println("Could not find a valid BMP388 sensor, check wiring!");
     while (1);
   }
+
+  analogReadResolution(12);  // UNO R4 = 12-bit ADC (0-4095)
 
   // ---- WIFI CONNECTION ----
   if (!skip_wifi) {
@@ -93,28 +94,22 @@ void loop() {
 void readSensors() {
   tempC = sht31.readTemperature();
   humRH = sht31.readHumidity();
+  pressure = bmp.readPressure();
 
   int adcValue = analogRead(anemometerPin);
-  
-  // Convert ADC value to voltage (Arduino ADC range is 0-5.0V)
-  float voltage = (adcValue / 1023.00) * 5.0;
-  
-  // Ensure the voltage is within the anemometer operating range
-  if (voltage < minVoltage) {
-    voltage = minVoltage;
-  } 
-  else if (voltage > maxVoltage) {
-    voltage = maxVoltage;
-  }
-  
-  // Map the voltage to wind speed
-  float windSpeed_mps = ((voltage - minVoltage) / (maxVoltage - minVoltage)) * maxWindSpeed;
 
-  // Convert wind speed to km/h and mph
-  float windSpeed_kmh = windSpeed_mps * mps_to_kmh;
-  float windSpeed_mph = windSpeed_mps * mps_to_mph;
+  //bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_8X);
+  //bmp.setPressureOversampling(BMP3_OVERSAMPLING_4X);
 
-  float pressure = bme.readPressure() / 100.0F; // Pa to hPa
+  // Convert ADC value (0–4095) to voltage
+  float voltage = (adcValue / 4095.0) * 5.0;
+
+  // Clamp voltage to operating range
+  if (voltage < minVoltage) voltage = minVoltage;
+  if (voltage > maxVoltage) voltage = maxVoltage;
+
+  // Convert voltage to wind speed (m/s)
+  windSpeed = ((voltage - minVoltage) / (maxVoltage - minVoltage)) * maxWindSpeed;
 }
 
 // =============================================================
@@ -131,13 +126,14 @@ void displayReadings() {
     Serial.println("ERROR: Failed to read SHT31.");
   }
 
-  Serial.print("Wind Speed: ");
-  Serial.print(windSpeed_mps); Serial.print(" m/s, ");
-  Serial.print(windSpeed_kmh); Serial.print(" km/h, ");
-  Serial.print(windSpeed_mph); Serial.println(" mph");
-  delay(2000);
+  Serial.print("Pressure = ");
+  pressure = bmp.pressure / 100.0;
+  Serial.print(pressure);
+  Serial.println(" hPa");
 
-  Serial.print("Pressure: "); Serial.print(pressure); Serial.print("hPa | ");
+  Serial.print("Wind Speed:  ");
+  Serial.print(windSpeed);
+  Serial.println(" m/s");
   delay(2000);
 }
 
@@ -160,8 +156,8 @@ void postReadingsToAWS() {
   // Sensor data
   doc["tempC"]      = String(tempC, 2);
   doc["humidity"]   = String(humRH, 2);
-  doc["Wind"]       = String(windSpeed_mph, 2);
-  doc["Pressure"]   = String(pressure, 2);
+  doc["pressure"]   = String(pressure, 2);
+  doc["windSpeed"]  = String(windSpeed, 2);
 
   String body;
   serializeJson(doc, body);
