@@ -1,73 +1,81 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Sat Nov 22 20:53:48 2025
+import json
+import urllib.request
+from time import sleep
+from datetime import datetime, timezone
+from arduino.app_utils import App, Bridge
 
-@author: db1950
-"""
+ENABLE_DEBUG_PRINT = True
+ENABLE_JSON_PRINT = True
 
-import serial
-# import pynmea2
-from pyubx2 import UBXReader
-import time
-import serial.tools.list_ports
+url = "https://7hcxwqqt37.execute-api.us-east-2.amazonaws.com/leaflink-default/leaflink-lambda-function"
 
-def list_usb_ports():
-    ports = serial.tools.list_ports.comports()
-    for port in ports:
-        print(f"{port.device} - {port.description}")
-# int_f2 = lambda a: f"{a:02d}"
+device = "Open-SkyQrgy111"
+# device = "Under-CanopyQ"
 
-###############################################################################
-# Inputs
-###############################################################################
-PORT     = "COM9"
-BAUDRATE = 9600
-fn1_out = "nav-sat.txt"
-fn2_out = "mon-rf.txt"
-fn3_out = "nav-posllh.txt"
+state = {}
+idle_cycles = 0
 
-# message keeping
-timeout = 1 # how long to wait for the serial connection before giving up [s]
-protfilter = 2 # only read ublox messages / ignore nmea # https://github.com/semuconsulting/pyubx2
+def on_cpp_payload(payload):
+    try:
+        state.update(json.loads(payload))
+    except Exception as e:
+        if ENABLE_DEBUG_PRINT:
+            print(f"PYTHON HOST JSON ERROR: {e}", flush=True)
 
-iterations = 100
-cit = 0
+def on_debug_payload(payload):
+    if ENABLE_DEBUG_PRINT:
+        print(f"C++ DEBUG: {payload}", flush=True)
 
+Bridge.provide("cpp_to_python", on_cpp_payload)
+Bridge.provide("debug", on_debug_payload)
 
-###############################################################################
-with serial.Serial(PORT, BAUDRATE, timeout=timeout) as ser, open(fn1_out, "a") as nav_sat_file, open(fn2_out, "a") as mon_rf_file, open(fn3_out, "a") as nav_pos_file:
-    ubr = UBXReader(ser, protfilter=protfilter)
-    while cit < iterations:
-        cit += 1
-        try:
-            (raw, parsed) = ubr.read()
-            if parsed:
-                # print(parsed)
-                pd = parsed.__dict__
-                
-                if parsed.identity == "NAV-SAT":
-                    numSvs = parsed.numSvs
-                    # clear / initialize lists
-                    vals = ["gnssId_", "svId_", "cno_", "elev_", "azim_"]
-                    ns_str = f"{time.time()}, "
-                    for a in range(numSvs):
-                        cur_sv = f"{a+1:02d}"
-                        for val in vals: 
-                            fval = val + cur_sv
-                            ns_str += f"{fval}={pd[fval]}, "
-                    ns_str += f"iTOW={pd['iTOW']} "
-                    nav_sat_file.write(f"{ns_str}\n")
-                    nav_sat_file.flush()
-                    
-                elif parsed.identity == "NAV-POSLLH":
-                    nav_pos_file.write(f"{time.time()}, iTOW={parsed.iTOW}, lat={parsed.lat}, lon={parsed.lon}, height={parsed.height} \n")
-                    nav_pos_file.flush()
-                    
-                elif parsed.identity == "MON-RF":
-                    mon_rf_file.write(f"{time.time()}, ACG1_Gain={parsed.agcCnt_01}, ACG2_Gain={parsed.agcCnt_02}\n")
-                    mon_rf_file.flush()
-                        
-        except KeyboardInterrupt:
-            break
-        except Exception as e:
-            print("UBX error:", e)
+def loop():
+    global idle_cycles
+
+    if not state:
+        idle_cycles += 1
+        if idle_cycles % 100 == 0 and ENABLE_DEBUG_PRINT:
+            print("PYTHON HOST: Awaiting C++ payload...", flush=True)
+        sleep(0.1)
+        return
+
+    idle_cycles = 0
+
+    now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    lat_deg = state.get("latitude", 0) / 1e7
+    lon_deg = state.get("longitude", 0) / 1e7
+    height_m = state.get("altitude", 0) / 1000.0
+
+    payload = {
+        "datetime": now_iso,
+        "timestamp_lambda": now_iso,
+        "device": device,
+        "hostMs": str(int(datetime.now().timestamp() * 1000)),
+        "fixType": int(state.get("fixType", 0)),
+        "lon": str(round(lon_deg, 7)),
+        "height_m": str(round(height_m, 2)),
+        "hAcc_mm": int(state.get("hAcc", 0)),
+        "numSV": int(state.get("numSVs", 0)),
+        "svIds": state.get("svID", "") or "",
+        "lat": str(round(lat_deg, 7)),
+        "iTOW_ms": int(state.get("iTOW_ms", 0)),
+    }
+
+    if ENABLE_JSON_PRINT:
+        print(f"PYTHON HOST: Dispatching JSON -> {json.dumps(payload)}", flush=True)
+
+    try:
+        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"))
+        req.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(req, timeout=5) as r:
+            if ENABLE_JSON_PRINT:
+                print(f"PYTHON HOST: AWS Response -> {r.read().decode('utf-8')}", flush=True)
+    except Exception as e:
+        if ENABLE_DEBUG_PRINT:
+            print(f"PYTHON HOST FAULT: {e}", flush=True)
+
+    sleep(2)
+
+if __name__ == "__main__":
+    App.run(user_loop=loop)
